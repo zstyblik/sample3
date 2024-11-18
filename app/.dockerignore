@@ -1,0 +1,6 @@
+Dockerfile
+*.pyc
+__pycache__
+.pytest_cache
+*.gitlab-ci.yml
+*.xml

@@ -1,0 +1,51 @@
+---
+.python_template: &python_settings
+  image: python:3.11.10-slim-bookworm
+
+.python:black:
+  <<: *python_settings
+  stage: lint
+  script:
+    - pip install -r app/requirements/requirements-ci.txt
+    - ci/run-black.sh check || ( ci/run-black.sh diff; exit 1 )
+
+.python:flake8:
+  <<: *python_settings
+  stage: lint
+  script:
+    - pip install -r app/requirements/requirements-ci.txt
+    - ci/run-flake8.sh
+
+.python:reorder-python-imports:
+  <<: *python_settings
+  stage: lint
+  script:
+    - pip install -r app/requirements/requirements-ci.txt
+    - ci/run-reorder-python-imports.sh
+
+.python:pytest:
+  <<: *python_settings
+  stage: test
+  script:
+    - pip install -r app/requirements/requirements.txt
+    - pip install -r app/requirements/requirements-test.txt
+    - ci/run-pytest.sh
+  artifacts:
+    when: always
+    access: "developer"
+    paths:
+      - app/pytest-result.xml
+    reports:
+      junit: app/pytest-result.xml
+
+.python:build_lambda_pkg:
+  <<: *python_settings
+  stage: build
+  script:
+    - apt-get update
+    - apt-get install -y zip
+    - ci/run-create_lambda_deployment_pkg.sh
+  artifacts:
+    access: "developer"
+    paths:
+      - deployment-package.zip

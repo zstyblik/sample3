@@ -1,0 +1,205 @@
+---
+include:
+  - local: /app/python.gitlab-ci.yml
+  - local: /terraform/terraform.gitlab-ci.yml
+
+stages:
+  - lint
+  - test
+  - build
+  - release
+  - deploy_dev_plan
+  - deploy_dev
+  - deploy_prod_plan
+  - deploy_prod
+  - cleanup
+
+variables:
+  PROJECT1_PIPELINE_NAME: "Pipeline for dpetv2"
+  DEV_TF_ROOT: ${CI_PROJECT_DIR}/terraform/environments/development
+  PROD_TF_ROOT: ${CI_PROJECT_DIR}/terraform/environments/production
+
+workflow:
+  auto_cancel:
+    on_new_commit: conservative
+  name: "$PROJECT1_PIPELINE_NAME"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      variables:
+        PROJECT1_PIPELINE_NAME: "MR pipeline for dpetv2: ${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}"
+        # NOTE(zstyblik): for CI_DEFAULT_BRANCH default to CI_DEFAULT_BRANCH
+        # since MR SRC BRANCH won't be available.
+        # NOTE(zstyblik): and yes, these could have been set by GitLab as CI/CD
+        # vars and it'd be better in some way. However, then I couldn't show you
+        # and I could change them without a trace(maybe it'd show up in paper
+        # trail?).
+        DEV_TF_BE_CONFIG: "-backend-config='key=p-example-weather-terraform/development/${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}/terraform.tfstate'"
+        DEV_TF_PLAN_ARGS: "-var ci_merge_request_id=${CI_MERGE_REQUEST_ID}"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: always
+    - if: $CI_COMMIT_TAG
+      # Don't run pipeline when git tag is pushed, at least for now.
+      when: never
+    - if: $CI_PIPELINE_SOURCE == "push"
+      when: never
+
+black:
+  extends: .python:black
+  stage: lint
+
+flake8:
+  extends: .python:flake8
+  stage: lint
+
+reorder-python-imports:
+  extends: .python:reorder-python-imports
+  stage: lint
+
+terraform_fmt:
+  extends: .terraform:fmt
+  stage: lint
+  needs: []
+
+terraform_validate_dev:
+  extends: .terraform:validate
+  stage: lint
+  variables:
+    TF_ROOT: ${DEV_TF_ROOT}
+    TF_CLI_ARGS_init: ${DEV_TF_BE_CONFIG}
+  environment:
+    name: development
+    action: access
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: always
+    # NOTE(zstyblik): let's save some CI minutes and time, otherwise it'd run
+    # even for default branch.
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: never
+
+terraform_validate_prod:
+  extends: .terraform:validate
+  stage: lint
+  variables:
+    TF_ROOT: ${PROD_TF_ROOT}
+  environment:
+    name: production
+    action: access
+  needs: []
+
+pytest:
+  extends: .python:pytest
+  stage: test
+
+build_lambda_pkg:
+  extends: .python:build_lambda_pkg
+  stage: build
+  rules:
+    - when: on_success
+
+# FIXME: release via API? need to know new git tag.
+release:
+  stage: release
+  before_script:
+    - git config --global user.name "${GITLAB_USER_NAME}"
+    - git config --global user.email "${GITLAB_USER_EMAIL}"
+  script:
+    - ci/create_git_tag.sh
+    - git push --tags https://root:$ACCESS_TOKEN@$CI_SERVER_HOST/$CI_PROJECT_PATH.git HEAD:$CI_COMMIT_BRANCH
+  resource_group: "default"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      allow_failure: false
+    - if: $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+      when: never
+
+deploy_dev_plan:
+  extends: .terraform:plan
+  stage: deploy_dev_plan
+  variables:
+    TF_ROOT: ${DEV_TF_ROOT}
+    TF_CLI_ARGS_plan: ${DEV_TF_PLAN_ARGS}
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    action: access
+  dependencies:
+    - build_lambda_pkg
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: never
+
+deploy_dev:
+  extends: .terraform:deploy
+  stage: deploy_dev
+  variables:
+    TF_ROOT: ${DEV_TF_ROOT}
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    action: start
+    on_stop: stop_dev
+    auto_stop_in: 5 minutes
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+    # NOTE(zstyblik): ephemeral deploy on default branch doesn't make much sense
+    # to me.
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: never
+
+stop_dev:
+  extends: .terraform:destroy
+  stage: cleanup
+  # NOTE(zstyblik): never ceases to amaze me how many things must be
+  # provided in order to destroy something via terraform.
+  before_script:
+    - touch "${CI_PROJECT_DIR}/deployment-package.zip"
+  variables:
+    # NOTE(zstyblik): it's possible this won't work when branch is deleted, but
+    # I'm out of CI minutes and I need to move on. Maybe cache whole terraform
+    # directory? This is based on hypothesis that we are in an empty directory
+    # and don't even have backend.tf. I don't know. ENOTIME.
+    # I hope all of this is easier with terragrunt. I've heard it's a silver
+    # bullet. If it isn't, then it's rather sad
+    # GIT_STRATEGY: none
+    TF_ROOT: ${DEV_TF_ROOT}
+    TF_CLI_ARGS_init: ${DEV_TF_BE_CONFIG}
+    TF_CLI_ARGS_destroy: ${DEV_TF_PLAN_ARGS} -auto-approve
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    action: stop
+  needs:
+    - deploy_dev
+  rules:
+    - if: $CI_MERGE_REQUEST_ID
+      when: manual
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: never
+
+deploy_prod_plan:
+  extends: .terraform:plan
+  stage: deploy_prod_plan
+  variables:
+    TF_ROOT: ${PROD_TF_ROOT}
+  environment:
+    name: production
+    action: access
+  dependencies:
+    - build_lambda_pkg
+  when: manual
+
+deploy_prod:
+  extends: .terraform:deploy
+  stage: deploy_prod
+  variables:
+    TF_ROOT: ${PROD_TF_ROOT}
+  environment:
+    name: production
+    action: start
+  dependencies:
+    - deploy_prod_plan
+    - build_lambda_pkg
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      allow_failure: false
+  when: manual

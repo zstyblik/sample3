@@ -1,0 +1,29 @@
+---
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/app/requirements"
+    schedule:
+      interval: "monthly"
+    groups:
+      patch-pip-dependencies:
+        # pip: Only group patch updates
+        update-types: [patch]
+  - package-ecosystem: "terraform"
+    directory:
+      - "/terraform/environments/production"
+      - "/terraform/environments/development"
+    schedule:
+      interval: "monthly"
+    groups:
+      patch-terraform-dependencies:
+        # pip: Only group patch updates
+        update-types: [patch]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      minor-github-actions-dependencies:
+        # GitHub Actions: Only group minor and patch updates
+        update-types: [minor, patch]
